@@ -26,7 +26,7 @@ Notes:
     - load image
 - The periodic timer update has been disabled to avoid spamming the engine.
 """
-
+from ultralytics import YOLO
 import chess
 import chess.svg
 from stockfish import Stockfish
@@ -41,22 +41,37 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-STOCKFISH_PATH = "stockfish"  # change if needed
+
+
+# --- ADD THIS IMPORT ---
+from ultralytics import YOLO
+
+# --- UPDATE CONFIGURATION ---
+# ... (existing config lines) ...
+STOCKFISH_PATH = r"C:\Users\ayush\OneDrive\Desktop\project gama\stockfish.exe" 
 STOCKFISH_DEPTH = 18
-MODEL_PATH = "piece_resnet50.pt"  # optional checkpoint
-NEURAL_CONFIDENCE_THRESHOLD = 0.78
-WARP_SIZE = 800
+
+# --- ADD THIS BLOCK ---
+stockfish = None
+try:
+    from stockfish import Stockfish
+    if os.path.exists(STOCKFISH_PATH):
+        stockfish = Stockfish(path=STOCKFISH_PATH, depth=STOCKFISH_DEPTH)
+        print(f"[Stockfish] Loaded successfully from {STOCKFISH_PATH}")
+    else:
+        print(f"[Stockfish] Warning: Executable not found at {STOCKFISH_PATH}")
+except Exception as e:
+    print(f"[Stockfish] Initialization failed: {e}")
+    stockfish = None
+# ----------------------
+
+# Point this to your new YOLO .pt file
+MODEL_PATH = "best.pt" 
+
+NEURAL_CONFIDENCE_THRESHOLD = 0.25  # YOLO is usually confident, 0.5 is safe
+WARP_SIZE = 800  # We will still warp the board to a flat square
 CLASS_ORDER_DEFAULT = ['P','N','B','R','Q','K','p','n','b','r','q','k','empty']
 
-# initialize Stockfish (update path if needed)
-STOCKFISH_PATH = r"C:\Users\ayush\OneDrive\Desktop\project gama\stockfish.exe"
-STOCKFISH_DEPTH = 18
-
-try:
-    stockfish = Stockfish(STOCKFISH_PATH, depth=STOCKFISH_DEPTH)
-except Exception:
-    # Keep a safe fallback if stockfish init fails
-    stockfish = None
 
 # PyQt5
 from PyQt5.QtWidgets import (
@@ -164,12 +179,6 @@ except Exception:
 # -------------------------
 # Configuration
 # -------------------------
-STOCKFISH_PATH = r"C:\Users\ayush\OneDrive\Desktop\project gama\stockfish.exe"  # set your path
-STOCKFISH_DEPTH = 18
-MODEL_PATH = "piece_resnet50.pt"
-NEURAL_CONFIDENCE_THRESHOLD = 0.78
-WARP_SIZE = 800
-CLASS_ORDER_DEFAULT = ['P','N','B','R','Q','K','p','n','b','r','q','k','empty']
 
 # Thread pool for background tasks (engine / model)
 EXECUTOR = ThreadPoolExecutor(max_workers=3)
@@ -289,34 +298,20 @@ MODEL = None
 CLASS_NAMES = CLASS_ORDER_DEFAULT
 transform_square = None
 def load_neural_model(path=MODEL_PATH):
-    global MODEL, CLASS_NAMES, transform_square
-    if not TORCH_AVAILABLE:
-        print("[neural] PyTorch not installed. Neural disabled.")
-        return None
+    global MODEL
     if not os.path.exists(path):
         print(f"[neural] checkpoint '{path}' not found. Neural disabled.")
         return None
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    chk = torch.load(path, map_location=device)
-    model = models.resnet50(pretrained=False)
-    model.fc = torch.nn.Linear(model.fc.in_features, 13)
-    model.load_state_dict(chk['model_state'])
-    model.to(device).eval()
-    class_map = chk.get('class_to_idx', None)
-    if class_map:
-        idx_to_class = {v:k for k,v in class_map.items()}
-        CLASS_NAMES = [idx_to_class[i] for i in range(len(idx_to_class))]
-    else:
-        CLASS_NAMES = CLASS_ORDER_DEFAULT
-    transform_square = transforms.Compose([
-        transforms.Resize((224,224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
-    ])
-    MODEL = (model, device)
-    print("[neural] model loaded on", device, "classes:", CLASS_NAMES)
-    return MODEL
-
+    
+    try:
+        print(f"[neural] Loading YOLO model from {path}...")
+        model = YOLO(path)
+        print("[neural] YOLO loaded successfully.")
+        print(f"[neural] Classes: {model.names}") # Print classes to check names
+        return model
+    except Exception as e:
+        print(f"[neural] Failed to load YOLO: {e}")
+        return None
 # -------------------------
 # Board detection + warp + squares
 # -------------------------
@@ -401,35 +396,123 @@ def build_fen_from_labels(labels):
         pass
     return cand1
 
-def neural_predict_fen(img_bgr, model_tuple):
-    if model_tuple is None:
+def map_yolo_class_to_fen(class_name):
+    # --- 1. HANDLE NEW DATASET (Single Letters) ---
+    # The new Roboflow dataset returns 'P', 'n', 'b', etc.
+    # We must return them AS IS because Case determines Color.
+    # We also ignore the 'board' class.
+    valid_fen_chars = ['P', 'N', 'B', 'R', 'Q', 'K', 'p', 'n', 'b', 'r', 'q', 'k']
+    
+    if class_name in valid_fen_chars:
+        return class_name
+    
+    # If the model detects the whole "board" box, ignore it.
+    if class_name == 'board':
+        return None
+    # -----------------------------------------------
+
+    # --- 2. FALLBACK FOR OLDER MODELS (Long names) ---
+    name = class_name.lower().replace(" ", "").replace("-", "_")
+    
+    if "white" in name:
+        if "pawn" in name: return 'P'
+        if "rook" in name: return 'R'
+        if "knight" in name: return 'N'
+        if "bishop" in name: return 'B'
+        if "queen" in name: return 'Q'
+        if "king" in name: return 'K'
+    elif "black" in name:
+        if "pawn" in name: return 'p'
+        if "rook" in name: return 'r'
+        if "knight" in name: return 'n'
+        if "bishop" in name: return 'b'
+        if "queen" in name: return 'q'
+        if "king" in name: return 'k'
+    
+    # Common abbreviations
+    mapping = {
+        'wp': 'P', 'wr': 'R', 'wn': 'N', 'wb': 'B', 'wq': 'Q', 'wk': 'K',
+        'bp': 'p', 'br': 'r', 'bn': 'n', 'bb': 'b', 'bq': 'q', 'bk': 'k'
+    }
+    return mapping.get(name, None)
+
+def neural_predict_fen(img_bgr, model):
+    if model is None:
         raise RuntimeError("Neural model not provided")
-    model, device = model_tuple
+    
+    # 1. Warp the board to a standard size (e.g. 800x800)
+    # This removes perspective so the grid is perfect squares.
     warp = detect_and_warp_board(img_bgr, out_size=WARP_SIZE)
-    squares = split_to_squares(warp)
-    inputs = []
-    for sq in squares:
-        pil = Image.fromarray(cv2.cvtColor(sq, cv2.COLOR_BGR2RGB))
-        t = transform_square(pil)
-        inputs.append(t)
-    batch = torch.stack(inputs).to(device)
-    with torch.no_grad():
-        logits = model(batch)
-        probs = torch.nn.functional.softmax(logits, dim=1)
-        preds = probs.argmax(dim=1).cpu().numpy()
-        confs = probs.max(dim=1).cpu().numpy()
+    
+    # 2. Run YOLO inference on the warped image
+    results = model(warp, verbose=False)
+    
+    # Prepare an empty 8x8 grid
+    # board_grid[row][col] = (fen_char, confidence)
+    board_grid = [[("empty", 0.0) for _ in range(8)] for _ in range(8)]
+    
+    square_size = WARP_SIZE // 8  # e.g. 100 pixels
+    
+    # 3. Process Detections
+    for r in results:
+        boxes = r.boxes
+        for box in boxes:
+            # Get coordinates and class
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            conf = float(box.conf[0].cpu().numpy())
+            cls_id = int(box.cls[0].cpu().numpy())
+            class_name = model.names[cls_id]
+            
+            # Map class name to FEN (P, n, k, etc.)
+            fen_char = map_yolo_class_to_fen(class_name)
+            if not fen_char:
+                continue
+            
+            # Calculate Center of the piece base
+            # We focus slightly lower (y + height*0.8) because chess pieces 
+            # stand on the square, but their heads might lean into the square above.
+            center_x = (x1 + x2) / 2
+            center_y = y2 - (y2 - y1) * 0.15 # Approx feet position
+            
+            # Map pixel to Grid Indices (0..7)
+            col = int(center_x // square_size)
+            row = int(center_y // square_size)
+            
+            # Safety check bounds
+            if 0 <= col < 8 and 0 <= row < 8:
+                # If a piece is already there, keep the one with higher confidence
+                current_piece, current_conf = board_grid[row][col]
+                if conf > current_conf:
+                     board_grid[row][col] = (fen_char, conf)
+
+    # 4. Build the final FEN string
+    # Note: 'detect_and_warp_board' usually puts Rank 8 at the top (row 0)
+    # But FEN expects Rank 8 first.
+    
     labels = []
-    per_sq = []
-    for i in range(64):
-        try:
-            cls = CLASS_NAMES[preds[i]]
-        except Exception:
-            cls = "empty"
-        conf = float(confs[i])
-        labels.append(cls)
-        per_sq.append((cls, conf))
+    per_sq_flat = []
+    
+    for r in range(8):
+        for c in range(8):
+            char, conf = board_grid[r][c]
+            labels.append(char)
+            per_sq_flat.append((char, conf))
+            
     fen = build_fen_from_labels(labels)
-    return fen, per_sq, warp
+    # 1. Warp the board
+    warp = detect_and_warp_board(img_bgr, out_size=WARP_SIZE)
+    
+    # --- ADD THIS DEBUG BLOCK ---
+    cv2.imshow("What the AI Sees", warp)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    # ----------------------------
+
+    # 2. Run YOLO inference
+    results = model(warp, verbose=False)
+    # ... (rest of code)
+    
+    return fen, per_sq_flat, warp
 
 def fallback_opencv_fen(img_bgr):
     warp = detect_and_warp_board(img_bgr, out_size=WARP_SIZE)
@@ -988,53 +1071,55 @@ class ChessImageApp(QWidget):
             return
 
         img = cv2.imread(fname)
-        
+        if img is None:
+            return
 
-
-        # img = auto_crop_board(img)
-
-        # # ⬇⬇⬇ INSERT THIS LINE HERE ⬇⬇⬇
-        # print("AUTO CROP RESULT:", type(img), img.shape if img is not None else "None")
-
-        # cv2.imshow("Cropped Board", img)
-        # cv2.waitKey(0)
-
-               
+        # --- FIX: Attempt to crop the board automatically ---
+        cropped = auto_crop_board(img)
+        if cropped is not None:
+            img = cropped
+            print("[Info] Board auto-cropped successfully.")
+        else:
+            print("[Warning] Could not auto-crop. Using full image.")
+        # ----------------------------------------------------
 
         ok, msg = validate_image_quality(img)
         if not ok:
-            QMessageBox.warning(self, "Bad Image", msg)
-            return
+            # We allow it to proceed but warn the user
+            QMessageBox.warning(self, "Image Quality Warning", msg)
 
         # Try neural → fallback
         fen = None
         per_sq = None
         used_neural = False
 
+        # Note: self.model_tuple is actually just the YOLO model object now
         if self.model_tuple is not None:
             try:
                 fen_pred, per_sq, warp = neural_predict_fen(img, self.model_tuple)
+                # Calculate average confidence
                 conf = np.mean([c for _, c in per_sq]) if per_sq else 0.0
+                
+                print(f"[Neural] Prediction finished. Avg Confidence: {conf:.2f}")
+                
                 if conf >= NEURAL_CONFIDENCE_THRESHOLD:
                     fen = fen_pred
                     used_neural = True
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Neural] Error during prediction: {e}")
+                traceback.print_exc()
 
         if not used_neural:
-            
+            print("[System] Falling back to OpenCV detection...")
             fen2, per_sq2, warp2 = chesscog_predict_fen(img)
-            
-            
-
             if fen2 is not None:
                 fen = fen2
-                
                 per_sq = per_sq2
             else:
                 QMessageBox.critical(self, "Error", "Recognition failed.")
                 return
 
+        # Autocorrect and Load
         fen = autocorrect_fen(fen, per_sq if per_sq else None)
         try:
             self.board = chess.Board(fen)
@@ -1043,10 +1128,10 @@ class ChessImageApp(QWidget):
 
         self.history = []
         self.refresh_board()
-        # Update eval & best move after loading
         self.update_engine_info()
-        QMessageBox.information(self, "Loaded", "Position loaded from image.")
-
+        
+        source = "YOLO AI" if used_neural else "OpenCV Fallback"
+        QMessageBox.information(self, "Loaded", f"Position loaded using {source}.")
     # --------------------------------------------------------------
     # Engine master toggle
     # --------------------------------------------------------------
@@ -1243,17 +1328,16 @@ class ChessImageApp(QWidget):
 # main()
 # -------------------------
 def main():
-    model_tuple = None
-    if TORCH_AVAILABLE and os.path.exists(MODEL_PATH):
-        try:
-            model_tuple = load_neural_model(MODEL_PATH)
-        except Exception:
-            model_tuple = None
+    # Attempt to load model independently of the old TORCH_AVAILABLE flag
+    model = None
+    if os.path.exists(MODEL_PATH):
+        model = load_neural_model(MODEL_PATH)
     else:
-        print("[main] Neural model not loaded. Using fallback.")
+        print(f"[main] Model file {MODEL_PATH} not found. Using OpenCV fallback.")
 
     app = QApplication(sys.argv)
-    w = ChessImageApp(model_tuple=model_tuple)
+    # Pass the model directly (variable name model_tuple is kept for compatibility with init)
+    w = ChessImageApp(model_tuple=model)
     w.show()
     sys.exit(app.exec_())
 
