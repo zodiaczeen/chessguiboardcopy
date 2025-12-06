@@ -59,5 +59,47 @@ Open `all_in_one_chess_gui.py` and update the paths at the top of the file to ma
 ```python
 # Configuration Section
 STOCKFISH_PATH = r"C:\Path\To\Your\stockfish.exe"
+🎮 Usage
+Run the Application:
+
+Bash
+
+python chess_image.py
+Load a Board:
+
+Click "Load Image" and select a screenshot of a chess position (e.g., from Chess.com or Lichess).
+
+The AI will attempt to recognize the pieces. If confident, it loads the position.
+
+Analyze:
+
+Click "Enable Engine Features" to see the Evaluation Bar and the Engine's Best Move.
+
+Use the "Turn: White/Black" button to ensure the engine analyzes for the correct player.
+
+Play/Fix:
+
+If the AI mistook a piece (e.g., Black King vs White King), simply drag the correct piece into place or make moves on the board to adjust the position.
+
+⚠️ Known Limitations
+King Color Confusion: On certain board themes (dark wood or low contrast), the AI may occasionally confuse the Black King for the White King. You can fix this manually by dragging pieces or editing the FEN.
+
+Perspective: The tool is optimized for 2D top-down board screenshots. 3D angled boards may have lower detection accuracy.
+
+🤝 Contributing
+Contributions are welcome! If you have a better trained YOLO model or want to improve the GUI:
+
+Fork the Project
+
+Create your Feature Branch
+
+Commit your Changes
+
+Push to the Branch
+
+Open a Pull Request
+
+📄 License
+Distributed under the MIT License. See LICENSE for more information.
 STOCKFISH_DEPTH = 18
 MODEL_PATH = "best.pt"
